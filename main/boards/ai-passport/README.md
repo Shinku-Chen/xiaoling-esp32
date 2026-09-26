@@ -77,6 +77,29 @@ python scripts/release.py ai-passport
    （`image_fetcher` 按图尺寸分配解码缓冲）在 BLE 常驻下尚未验证。若要再腾空间，可做
    「配网后释放 BLE」（~56 KB）或把 BT 主机换 NimBLE（~20-25 KB），属共享代码改动。
 
+## 待机表情（小聆动图）
+
+240px 的小聆动图放不下（`gifdec` 画布 5B/px，240x124 ≈ 145KB），所以本板用小尺寸方案
+（`scripts/gen_xl_emoji_small.py` 生成到 `main/assets/xl_emoji/idle/`，由 CMakeLists 的
+`xl_idle_gif` 分支挂上）：
+
+- 待机情绪 `ready`：**96x50 的小聆动图**（画布约 25KB），只在待机时占用；
+- 其余 10 个小聆情绪名：32px 静态图（几乎不占堆）。
+
+`SetEmotion()` 换情绪时会先释放旧动图，因此动图画布不会长期与音频/TLS 抢内存。
+
+与之配套、同样必须保留的两条（都是实测踩出来的）：
+
+- **mbedTLS 输入记录缓冲 16384 → 4096**（`CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN`，并打开
+  `CONFIG_MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH`）：默认 16KB 输入 + 4KB 输出在建立 WS/TLS 时会
+  吃掉会话期仅有的余量，实测导致上行麦克风缓冲（2.8KB）分配失败 → `abort()` 重启循环；
+- **上行编码器要尽早创建**（`Application` 在激活完成后调用 `AudioService::PrepareUplinkEncoder()`）：
+  Opus 16k 编码器约占 25.8KB 且是一次性大块分配，等对话首帧再建会撞上碎片化，
+  `opus_encoder_create()` 返回 `OPUS_ALLOC_FAIL`，而上行会一直发不出去（用户什么也听不到）。
+  现在创建前先检查连续块大小、创建后用堆下降量确认真建起来了，失败只丢帧并重试。
+
+上行/解码路径在堆不足时都只丢数据 + 限流打日志，不再让 `std::bad_alloc` 逃出音频任务触发重启。
+
 ## 蓝牙配网二维码
 
 配网二维码不再直接嵌 PNG。本仓关闭了 LVGL 图片缓存（`CONFIG_LV_CACHE_DEF_SIZE=0`），

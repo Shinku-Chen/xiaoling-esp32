@@ -596,12 +596,14 @@ elseif(CONFIG_BOARD_TYPE_AI_PASSPORT)
     set(BOARD_TYPE "ai-passport")
     set(BUILTIN_TEXT_FONT font_puhui_basic_20_4)
     set(BUILTIN_ICON_FONT font_awesome_20_4)
-    # ESP32-C3 has no PSRAM. gifdec allocates 5 bytes per pixel for the 小聆 GIF
-    # emoji set (240x124 -> ~145 KB canvas), which does not fit in the ~230 KB
-    # heap next to Wi-Fi/audio/LVGL (measured: only ~5-61 KB free at that point).
-    # Use the 32 px twemoji PNGs, matching the upstream XiaoZhi ai-passport board
-    # definition (noto-color-emoji_32).
-    set(DEFAULT_EMOJI_COLLECTION twemoji_32)
+    # ESP32-C3 无 PSRAM：240px 小聆动图的画布是 5B/px（约 145KB），放不下。
+    # 小聆风格下用「待机动图 + 其余静态」的组合集（scripts/gen_xl_emoji_small.py 生成）：
+    # 待机情绪 ready 用 96x50 动图（画布约 25KB，情绪一变就会被释放），其它情绪用 32px 静态图。
+    if(CONFIG_USE_XIAOLING_MESSAGE_STYLE)
+        set(DEFAULT_EMOJI_COLLECTION xl_idle_gif)
+    else()
+        set(DEFAULT_EMOJI_COLLECTION twemoji_32)
+    endif()
 endif()
 
 file(GLOB BOARD_SOURCES
@@ -868,6 +870,11 @@ function(build_default_assets_bin)
         if(DEFAULT_EMOJI_COLLECTION STREQUAL "twemoji_64")
             list(APPEND BUILD_ARGS "--emoji_path" ${EMOJI_DIR})
             set(DEFAULT_EMOJI_COLLECTION "240")
+        elseif(DEFAULT_EMOJI_COLLECTION STREQUAL "xl_idle_gif")
+            # 无 PSRAM 的小内存板：待机用缩小版小聆动图（只在待机时占画布），其余情绪用 32px 静态图，
+            # 集合由 scripts/gen_xl_emoji_small.py 生成到 assets/xl_emoji/idle。
+            list(APPEND BUILD_ARGS "--emoji_path" ${EMOJI_DIR})
+            set(DEFAULT_EMOJI_COLLECTION "idle")
         endif()
     endif()
     if(DEFAULT_EMOJI_COLLECTION)
