@@ -126,6 +126,12 @@ private:
     std::unique_ptr<AudioDebugger> audio_debugger_;
     std::unique_ptr<OpusEncoderWrapper> opus_encoder_;
     std::unique_ptr<OpusDecoderWrapper> opus_decoder_;
+    // 上行编码器延迟创建：配网/激活阶段没有上行音频，没必要在开机时就占约 26KB 堆。
+    // 期望参数由 SetEncodeSampleRate() 记录，首次编码前按需创建。
+    int encoder_sample_rate_ = 16000;
+    int encoder_frame_duration_ = OPUS_FRAME_DURATION_MS;
+    int encoder_create_failures_ = 0;
+    OpusEncoderWrapper* GetOrCreateEncoder();
     OpusResampler input_resampler_;
     OpusResampler reference_resampler_;
 #ifdef CONFIG_LSPLATFORM

@@ -1,6 +1,9 @@
 #include "audio_service.h"
+#include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <esp_system.h>
 #include <cstring>
+#include <new>
 
 #if CONFIG_USE_AUDIO_PROCESSOR
 #include "processors/afe_audio_processor.h"
@@ -39,8 +42,11 @@ void AudioService::Initialize(AudioCodec* codec) {
 
     /* Setup the audio codec */
     opus_decoder_ = std::make_unique<OpusDecoderWrapper>(codec->output_sample_rate(), 1, OPUS_FRAME_DURATION_MS);
-    opus_encoder_ = std::make_unique<OpusEncoderWrapper>(16000, 1, OPUS_FRAME_DURATION_MS);
-    opus_encoder_->SetComplexity(0);
+    // 编码器不在开机时创建：配网/激活阶段没有上行音频，延迟到首次编码再分配（约 26KB），
+    // 给蓝牙配网、Wi-Fi 连接、DHCP 留出堆。编码复杂度已在 OpusEncoderWrapper 构造函数里设为 0。
+    encoder_sample_rate_ = 16000;
+    encoder_frame_duration_ = OPUS_FRAME_DURATION_MS;
+    opus_encoder_.reset();
 
     if (codec->input_sample_rate() != 16000) {
         input_resampler_.Configure(codec->input_sample_rate(), 16000);
@@ -360,16 +366,20 @@ void AudioService::OpusCodecTask() {
             packet->frame_duration = OPUS_FRAME_DURATION_MS;
             packet->sample_rate = 16000;
             packet->timestamp = task->timestamp;
+            auto* encoder = GetOrCreateEncoder();
+            if (encoder == nullptr) {
+                continue;  // 堆不足：丢这一帧，不要抛异常出任务
+            }
 #ifdef CONFIG_LSPLATFORM
-            if (opus_encoder_->sample_rate() != 16000) {
+            if (encoder->sample_rate() != 16000) {
                 int target_size = uplink_resampler_.GetOutputSamples(task->pcm.size());
                 std::vector<int16_t> resampled(target_size);
                 uplink_resampler_.Process(task->pcm.data(), task->pcm.size(), resampled.data());
                 task->pcm = std::move(resampled);
-                packet->sample_rate = opus_encoder_->sample_rate();
+                packet->sample_rate = encoder->sample_rate();
             }
 #endif // CONFIG_LSPLATFORM
-            if (!opus_encoder_->Encode(std::move(task->pcm), packet->payload)) {
+            if (!encoder->Encode(std::move(task->pcm), packet->payload)) {
                 ESP_LOGE(TAG, "Failed to encode audio");
                 continue;
             }
@@ -404,17 +414,41 @@ void AudioService::SetNarrowbandMode(bool enabled) {
 }
 
 void AudioService::SetEncodeSampleRate(int sample_rate, int frame_duration) {
-    if (opus_encoder_->sample_rate() == sample_rate && opus_encoder_->duration_ms() == frame_duration) {
+    if (encoder_sample_rate_ == sample_rate && encoder_frame_duration_ == frame_duration) {
         return;
     }
 
+    // 只记录期望参数并丢弃已创建的编码器，下次编码时按新参数重建（与原实现行为一致）
+    encoder_sample_rate_ = sample_rate;
+    encoder_frame_duration_ = frame_duration;
     opus_encoder_.reset();
-    opus_encoder_ = std::make_unique<OpusEncoderWrapper>(sample_rate, 1, frame_duration);
 
-    if (opus_encoder_->sample_rate() != 16000) {
-        ESP_LOGI(TAG, "Resampling uplink audio to %d", opus_encoder_->sample_rate());
-        uplink_resampler_.Configure(16000, opus_encoder_->sample_rate());
+    if (sample_rate != 16000) {
+        ESP_LOGI(TAG, "Resampling uplink audio to %d", sample_rate);
+        uplink_resampler_.Configure(16000, sample_rate);
     }
+}
+
+// 按需创建上行编码器。堆不足时返回 nullptr，由调用方丢帧并报错：
+// 让 std::bad_alloc 逃出音频任务会触发 std::terminate -> abort -> 重启循环。
+OpusEncoderWrapper* AudioService::GetOrCreateEncoder() {
+    if (opus_encoder_ != nullptr) {
+        return opus_encoder_.get();
+    }
+    try {
+        opus_encoder_ = std::make_unique<OpusEncoderWrapper>(encoder_sample_rate_, 1, encoder_frame_duration_);
+        ESP_LOGI(TAG, "Created Opus encoder on demand (rate=%d, frame=%dms)",
+                 encoder_sample_rate_, encoder_frame_duration_);
+    } catch (const std::bad_alloc&) {
+        // 帧间隔 60ms，失败时不要刷屏
+        if (encoder_create_failures_++ % 100 == 0) {
+            ESP_LOGE(TAG, "No memory for Opus encoder (free=%u largest=%u), dropping uplink frame",
+                     (unsigned)esp_get_free_heap_size(),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+        }
+        return nullptr;
+    }
+    return opus_encoder_.get();
 }
 #endif // CONFIG_LSPLATFORM
 

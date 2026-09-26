@@ -57,16 +57,25 @@ python scripts/release.py ai-passport
    分配画布（约 145 KB），无法与 Wi-Fi/音频/LVGL 共存（改前实测空闲堆只剩 5-6 KB）。
    本板用 `twemoji_32`（上游 XiaoZhi 同名板也是 32 px 表情）；小聆配色的表情名
    （ready/happy/…）在 twemoji_32 中命中一部分，未命中的回落到 FontAwesome 图标。
-2. **BLE 配网需要额外约 56 KB，且配网完成后不会释放**：小聆默认的 BLE 配网（Blufi）在这块板上要配套两项板级配置才能起来：
-   - 关闭开机提示音（`CONFIG_DISABLE_STARTUP_SOUND=y`）——否则播配网提示音时堆只剩约 5 KB，
-     音频重采样缓冲分配失败（`std::bad_alloc` 无人捕获）→ `abort()` 重启循环；
-   - 裁剪 Wi-Fi/BT 缓冲（`config.json` 里的 `ESP_WIFI_DYNAMIC_TX_BUFFER_NUM` / `BT_CTRL_BLE_MAX_ACT` 等）——
-     否则 BLE 初始化阶段就会 `Malloc failed`。
+2. **BLE 配网 + Wi-Fi + 应用在 230 KB 上要精打细算**：这块板最终靠下面三件事才把「蓝牙配网 → 激活 → 对话」跑通
+   （2026-09-26 实机验证，全链路无 abort、无 `malloc failed`）：
+   - 关闭开机提示音（`CONFIG_DISABLE_STARTUP_SOUND=y`）：否则播配网提示音时堆只剩约 5 KB，
+     音频重采样缓冲（2880 B）分配失败 → `std::bad_alloc` 无人捕获 → `abort()` 重启循环；
+   - 裁剪 Wi-Fi/TCP/BT 缓冲（见 `config.json`）：不裁剪时 BLE 初始化就会 `Malloc failed`，之后 BLE 安全握手
+     要 530 B 也会失败（实测 `BT_OSI: malloc failed size=530`，同时 `largest_block=480`），手机侧表现是
+     "卡在接收 wifi 账号"。注意 BT 控制器参数不能压太狠：`BT_CTRL_BLE_MAX_ACT=1` 会让广播起不来
+     （`Advertising start failed, status 3`），本板保持 2；
+   - Opus **上行编码器按需创建**（`main/audio/audio_service.cc`，省约 25.8 KB）：不延迟创建时，关联 Wi-Fi 后
+     DHCP 争不到 pbuf（1.5~3 KB），拿不到 IP，同样卡在配网。该路径同时改为失败时丢帧 + 报错，
+     不再让 `std::bad_alloc` 逃出音频任务触发重启。
 
-   两者都落到 `config.json` 后，设备可稳定运行、BLE 正常广播并显示配网二维码。
-   **仍然受限的是配网之后的阶段**：BLE 配网成功后从不释放（`esp_blufi_host_deinit` 只有定义、无调用方），
-   常驻的 56 KB 会挤掉激活用的 TLS 缓冲与语音解码缓冲。要根本解决需要在 fork 里做内存优化
-   （配网后释放 BLE、Opus 编码器延迟创建、BT 主机换 NimBLE），属共享代码改动，未包含在本板支持里。
+   实测链路：BLE 配网（收 SSID/密码 → `sta ip` → 收 `done` → `BLUFI config done` → 自动重启）→
+   `Got IP` → `starting -> activating` → `Activation done` → 会话中按需创建编码器
+   （`Created Opus encoder on demand`）→ 多轮 `listening/speaking` 正常。
+
+   当前 BLE 仍常驻约 56 KB（`esp_blufi_host_deinit` 无调用方）；激活阶段的服务端二维码
+   （`image_fetcher` 按图尺寸分配解码缓冲）在 BLE 常驻下尚未验证。若要再腾空间，可做
+   「配网后释放 BLE」（~56 KB）或把 BT 主机换 NimBLE（~20-25 KB），属共享代码改动。
 
 ## 蓝牙配网二维码
 
