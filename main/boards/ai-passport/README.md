@@ -34,8 +34,7 @@ python scripts/release.py ai-passport
 
 三个物理键对应语音助手的常用操作：
 
-- **OK**：单击切换对话状态（开机阶段单击进入配网）
-- **UP**：单击音量 +10；长按最大音量
+- **OK**：单击切换对话状态（开机阶段单击进入配网）- **UP**：单击音量 +10；长按最大音量
 - **DOWN**：单击音量 -10；长按静音
 
 电阻梯共用一个 ADC 引脚，因此按三路独立 ADC 按键解析（与 ESP-BOX-Lite 同一套做法）。
@@ -58,17 +57,30 @@ python scripts/release.py ai-passport
    分配画布（约 145 KB），无法与 Wi-Fi/音频/LVGL 共存（改前实测空闲堆只剩 5-6 KB）。
    本板用 `twemoji_32`（上游 XiaoZhi 同名板也是 32 px 表情）；小聆配色的表情名
    （ready/happy/…）在 twemoji_32 中命中一部分，未命中的回落到 FontAwesome 图标。
-2. **默认必须改用 Wi-Fi AP 配网**：小聆默认的 BLE 配网（Blufi）在此板上需要额外约
-   56 KB，实测开启后启动阶段堆仅剩约 5 KB，`BLE_INIT: Malloc failed`，随后本地提示音
-   解码分配失败（`audio_service.cc` 的 `std::vector<int16_t> resampled` 抛
-   `std::bad_alloc` 且无人捕获）→ `abort()` 重启循环。改用 AP 配网
-   （`CONFIG_PROV_MODE_XIAOZHI=y`）后空闲堆约 61 KB，设备正常运行：
-   配网 AP `Xiaoling-xxxx` + `http://192.168.4.1` 网页配置，连上后进入 activating
-   并显示激活码与二维码。
+2. **BLE 配网需要额外约 56 KB，且配网完成后不会释放**：小聆默认的 BLE 配网（Blufi）在这块板上要配套两项板级配置才能起来：
+   - 关闭开机提示音（`CONFIG_DISABLE_STARTUP_SOUND=y`）——否则播配网提示音时堆只剩约 5 KB，
+     音频重采样缓冲分配失败（`std::bad_alloc` 无人捕获）→ `abort()` 重启循环；
+   - 裁剪 Wi-Fi/BT 缓冲（`config.json` 里的 `ESP_WIFI_DYNAMIC_TX_BUFFER_NUM` / `BT_CTRL_BLE_MAX_ACT` 等）——
+     否则 BLE 初始化阶段就会 `Malloc failed`。
 
-因此本板当前的可用构建方式：在 `config.json` 的 `sdkconfig_append` 里加
-`CONFIG_PROV_MODE_XIAOZHI=y`（本次上机验收用的镜像就是该配置），或先手工在 sdkconfig
-追加同一行再 `idf.py build`。是否把这一项固化进 `config.json` 属产品取舍，待确认。
+   两者都落到 `config.json` 后，设备可稳定运行、BLE 正常广播并显示配网二维码。
+   **仍然受限的是配网之后的阶段**：BLE 配网成功后从不释放（`esp_blufi_host_deinit` 只有定义、无调用方），
+   常驻的 56 KB 会挤掉激活用的 TLS 缓冲与语音解码缓冲。要根本解决需要在 fork 里做内存优化
+   （配网后释放 BLE、Opus 编码器延迟创建、BT 主机换 NimBLE），属共享代码改动，未包含在本板支持里。
 
-保留 BLE 配网需要先在小聆方案里再腾出约 60 KB 堆（例如关闭 `LSPLATFORM_BANNERS`、
-缩小 LVGL/音频缓冲），属产品取舍，未在本板默认配置中改动。
+## 蓝牙配网二维码
+
+配网二维码不再直接嵌 PNG。本仓关闭了 LVGL 图片缓存（`CONFIG_LV_CACHE_DEF_SIZE=0`），
+以 PNG/JPEG 这类压缩图作为 `lv_image` 源时每一帧都要重新解码：128x128 需要约 32 KB 解码缓冲，
+而 C3 在蓝牙配网阶段只剩几 KB 堆，解码必然失败，表现就是**屏幕上只有文案、没有二维码**。
+现改为预解码的 RGB565 常量图（`main/assets/common/xl_ble_prov_qr.rgb565`，32 KB 放 flash），
+绘制时不做解码、不占堆。
+
+改图流程（`main/CMakeLists.txt` 的 `BLUFI_ASSETS` 指向产物，改完重新编译即可）：
+
+```sh
+python scripts/gen_qr_image.py   # main/assets/common/xl_ble_prov.png -> xl_ble_prov_qr.rgb565
+```
+
+注意：激活阶段的服务端二维码（`cdn.iflyos.cn/.../*.jpg`）仍走 `image_fetcher` 的解码路径，
+需要按图片尺寸分配解码缓冲，在 BLE 常驻内存的情况下可能同样显示不出来；这要靠上面说的内存优化解决。

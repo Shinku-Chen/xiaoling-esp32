@@ -334,7 +334,9 @@ void Application::HandleActivationDoneEvent() {
     display->SetChatMessage("system", "");
 
     // Play the success sound to indicate the device is ready
+#if !CONFIG_DISABLE_STARTUP_SOUND
     audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
+#endif
 
     // Release OTA object after activation is complete
     ota_.reset();
@@ -711,17 +713,25 @@ void Application::ShowActivationCode(const std::string& code, const std::string&
         ESP_LOGW(TAG, "QR code URL is empty, skipping image download");
     }
 
+#if !CONFIG_DISABLE_STARTUP_SOUND
     audio_service_.PlaySound(Lang::Sounds::OGG_WECHAT_QRCODE);
     audio_service_.PlaySound(Lang::Sounds::OGG_BINDING);
+#endif
 #else // !CONFIG_LSPLATFORM
     // This sentence uses 9KB of SRAM, so we need to wait for it to finish
+#if CONFIG_DISABLE_STARTUP_SOUND
+    Alert(Lang::Strings::ACTIVATION, message.c_str(), "link", "");
+#else
     Alert(Lang::Strings::ACTIVATION, message.c_str(), "link", Lang::Sounds::OGG_ACTIVATION);
+#endif
 #endif // CONFIG_LSPLATFORM
     for (const auto& digit : code) {
         auto it = std::find_if(digit_sounds.begin(), digit_sounds.end(),
             [digit](const digit_sound& ds) { return ds.digit == digit; });
         if (it != digit_sounds.end()) {
+#if !CONFIG_DISABLE_STARTUP_SOUND
             audio_service_.PlaySound(it->sound);
+#endif
         }
     }
 }

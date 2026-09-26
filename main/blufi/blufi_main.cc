@@ -76,8 +76,40 @@ static bool provstate = false;
 static bool authstate = false;
 char ble_name[24];
 
-extern const char xl_ble_prov_png_start[] asm("_binary_xl_ble_prov_png_start");
-extern const char xl_ble_prov_png_end[]   asm("_binary_xl_ble_prov_png_end");
+// 配网二维码以预解码的 RGB565 常量图绘制（由 scripts/gen_qr_image.py 生成，
+// 见 main/CMakeLists.txt 的 BLUFI_ASSETS）。
+// 不能直接拿压缩图（PNG）当 lv_image 源：本仓关闭了 LVGL 图片缓存
+// （CONFIG_LV_CACHE_DEF_SIZE=0），压缩图每帧都要重新解码，128x128 需要
+// 约 32KB 解码缓冲；ESP32-C3 在蓝牙配网阶段几乎不剩堆，解码失败就看不到二维码。
+#define BLE_PROV_QR_W 128
+#define BLE_PROV_QR_H 128
+
+extern "C"
+{
+extern const uint8_t xl_ble_prov_qr_rgb565_start[] asm("_binary_xl_ble_prov_qr_rgb565_start");
+extern const uint8_t xl_ble_prov_qr_rgb565_end[] asm("_binary_xl_ble_prov_qr_rgb565_end");
+}
+
+// 描述符指向 flash 中的常量图，绘制时不需要解码，也不需要堆。
+static const lv_image_dsc_t* GetBleProvQrDsc()
+{
+    static lv_image_dsc_t dsc = {};
+    if (dsc.data == nullptr) {
+        const uint32_t size = (uint32_t)(xl_ble_prov_qr_rgb565_end - xl_ble_prov_qr_rgb565_start);
+        if (size != (uint32_t)(BLE_PROV_QR_W * BLE_PROV_QR_H * 2)) {
+            BLUFI_ERROR("Unexpected provisioning QR asset size: %u (want %u)\n",
+                        (unsigned)size, (unsigned)(BLE_PROV_QR_W * BLE_PROV_QR_H * 2));
+        }
+        dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+        dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+        dsc.header.w = BLE_PROV_QR_W;
+        dsc.header.h = BLE_PROV_QR_H;
+        dsc.header.stride = BLE_PROV_QR_W * 2;
+        dsc.data_size = size;
+        dsc.data = xl_ble_prov_qr_rgb565_start;
+    }
+    return &dsc;
+}
 
 esp_err_t report_id()
 {
@@ -489,14 +521,16 @@ void blufi_start(void)
 
     BLUFI_INFO("BLUFI VERSION %04x\n", esp_blufi_get_version());
 
-    auto qrcode = std::make_unique<LvglRawImage>((void *)xl_ble_prov_png_start, (size_t)(xl_ble_prov_png_end - xl_ble_prov_png_start));
+    auto qrcode = std::make_unique<LvglSourceImage>(GetBleProvQrDsc());
 
     auto display = Board::GetInstance().GetDisplay();
     display->ShowActivation(std::move(qrcode), "扫码或搜索“小聆AI”小程序\n选择ESP32 - 蓝牙配网");
 
     // std::string msg = "扫码或搜索“小聆AI”小程序\n选择ESP32 - 蓝牙配网";
     // application.Alert(Lang::Strings::WIFI_CONFIG_MODE, msg.c_str(), "xl_ble_prov", Lang::Sounds::OGG_WIFICONFIG);
+#if !CONFIG_DISABLE_STARTUP_SOUND
     application.PlaySound(Lang::Sounds::OGG_XL_BLE_PROV);
+#endif
 
     while (!provstate || !authstate) {
         vTaskDelay(1000 / portTICK_PERIOD_MS);

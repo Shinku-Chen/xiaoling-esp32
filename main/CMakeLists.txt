@@ -60,7 +60,9 @@ list(APPEND SOURCES "blufi/blufi_security.cc"
                     "blufi/blufi_init.cc"
                     "blufi/blufi_main.cc")
 list(APPEND INCLUDE_DIRS "blufi")
-set(BLUFI_ASSETS ${CMAKE_CURRENT_SOURCE_DIR}/assets/common/xl_ble_prov.png)
+# 蓝牙配网二维码：预解码的 LVGL RGB565 常量图（scripts/gen_qr_image.py 生成）。
+# 不能嵌原始 PNG：LVGL 图片缓存已关闭，压缩图每帧都要解码约 32KB，小内存板会在配网阶段解码失败。
+set(BLUFI_ASSETS ${CMAKE_CURRENT_SOURCE_DIR}/assets/common/xl_ble_prov_qr.rgb565)
 endif() # CONFIG_PROV_MODE_BLE
 
 idf_build_get_property(build_components BUILD_COMPONENTS)

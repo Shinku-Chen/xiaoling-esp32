@@ -759,6 +759,17 @@ config SEND_WAKE_WORD_DATA
     help
         Send wake word data to the server as the first message of the conversation and wait for response
 
+config DISABLE_STARTUP_SOUND
+    bool "Disable startup prompts"
+    default n
+    help
+        关闭首次运行流程里的提示音：BLE 配网提示音、激活提示音与激活码数字音、
+        激活完成（设备就绪）提示音。会话中的交互音不受影响。
+
+        ESP32-C3 等无 PSRAM 的板子在配网阶段可用堆很小，而提示音需要走
+        Opus 解码 + 重采样分配缓冲区，堆不足时可能直接失败；打开本项可避开。
+        仅建议由内存紧张的板子在 config.json 里置 y。
+
 config USE_AUDIO_PROCESSOR
     bool "Enable Audio Noise Reduction"
     default y
