@@ -538,6 +538,9 @@ choice BOARD_TYPE
     config BOARD_TYPE_HU_087
         bool "HU-087"
         depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_AI_PASSPORT
+        bool "FoloToy AI Passport (ESP32-C3)"
+        depends on IDF_TARGET_ESP32C3
 endchoice
 
 choice
