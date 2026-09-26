@@ -594,7 +594,12 @@ elseif(CONFIG_BOARD_TYPE_AI_PASSPORT)
     set(BOARD_TYPE "ai-passport")
     set(BUILTIN_TEXT_FONT font_puhui_basic_20_4)
     set(BUILTIN_ICON_FONT font_awesome_20_4)
-    set(DEFAULT_EMOJI_COLLECTION twemoji_64)
+    # ESP32-C3 has no PSRAM. gifdec allocates 5 bytes per pixel for the 小聆 GIF
+    # emoji set (240x124 -> ~145 KB canvas), which does not fit in the ~230 KB
+    # heap next to Wi-Fi/audio/LVGL (measured: only ~5-61 KB free at that point).
+    # Use the 32 px twemoji PNGs, matching the upstream XiaoZhi ai-passport board
+    # definition (noto-color-emoji_32).
+    set(DEFAULT_EMOJI_COLLECTION twemoji_32)
 endif()
 
 file(GLOB BOARD_SOURCES
