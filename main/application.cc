@@ -324,6 +324,9 @@ void Application::HandleActivationDoneEvent() {
     ESP_LOGI(TAG, "Activation done");
 
     SystemInfo::PrintHeapStats();
+    // 激活完成时堆最宽裕，趁早把上行编码器分配好：等对话首帧再创建容易撞上碎片化而失败
+    // （实测碎片化时 opus_encoder_create 返回 OPUS_ALLOC_FAIL，上行会一直发不出去）
+    audio_service_.PrepareUplinkEncoder();
     SetDeviceState(kDeviceStateIdle);
 
     has_server_time_ = ota_->HasServerTime();

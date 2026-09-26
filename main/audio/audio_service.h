@@ -118,6 +118,10 @@ public:
     void SetNarrowbandMode(bool enabled);
 #endif // CONFIG_LSPLATFORM
 
+    // 让上行编码器尽早分配（例如激活完成、堆还宽裕时），
+    // 避开对话首帧才开始创建时容易撞上的碎片化。
+    void PrepareUplinkEncoder();
+
 private:
     AudioCodec* codec_ = nullptr;
     AudioServiceCallbacks callbacks_;
@@ -131,6 +135,8 @@ private:
     int encoder_sample_rate_ = 16000;
     int encoder_frame_duration_ = OPUS_FRAME_DURATION_MS;
     int encoder_create_failures_ = 0;
+    // 上行/解码路径在堆不足时丢数据时的限流计数（共用）
+    int read_failures_ = 0;
     OpusEncoderWrapper* GetOrCreateEncoder();
     OpusResampler input_resampler_;
     OpusResampler reference_resampler_;

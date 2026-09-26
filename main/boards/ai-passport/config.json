@@ -23,7 +23,9 @@
                 "CONFIG_BT_CTRL_BLE_MAX_ACT=2",
                 "CONFIG_BT_ACL_CONNECTIONS=2",
                 "CONFIG_BT_CTRL_ADV_DUP_FILT_MAX=10",
-                "CONFIG_BT_BLE_42_DTM_TEST_EN=n"
+                "CONFIG_BT_BLE_42_DTM_TEST_EN=n",
+                "CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=4096",
+                "CONFIG_MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH=y"
             ]
         }
     ]

@@ -143,6 +143,9 @@ void AudioService::Stop() {
 }
 
 bool AudioService::ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples) {
+    // 麦克风路径会 resize/新建若干 vector；堆紧张时不要让 std::bad_alloc 逃出音频任务
+    // （逃出会 std::terminate -> abort -> 重启循环），丢这一块数据即可。
+    try {
     if (!codec_->input_enabled()) {
         esp_timer_stop(audio_power_timer_);
         esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
@@ -195,6 +198,15 @@ bool AudioService::ReadAudioData(std::vector<int16_t>& data, int sample_rate, in
 #endif
 
     return true;
+    } catch (const std::bad_alloc&) {
+        // 帧率 60ms，限流打印
+        if (read_failures_++ % 100 == 0) {
+            ESP_LOGE(TAG, "No memory for mic buffers (free=%u largest=%u), dropping mic block",
+                     (unsigned)esp_get_free_heap_size(),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+        }
+        return false;
+    }
 }
 
 void AudioService::AudioInputTask() {
@@ -336,13 +348,22 @@ void AudioService::OpusCodecTask() {
             task->timestamp = packet->timestamp;
 
             SetDecodeSampleRate(packet->sample_rate, packet->frame_duration);
-            if (opus_decoder_->Decode(std::move(packet->payload), task->pcm)) {
+            if (opus_decoder_ != nullptr && opus_decoder_->Decode(std::move(packet->payload), task->pcm)) {
                 // Resample if the sample rate is different
                 if (opus_decoder_->sample_rate() != codec_->output_sample_rate()) {
-                    int target_size = output_resampler_.GetOutputSamples(task->pcm.size());
-                    std::vector<int16_t> resampled(target_size);
-                    output_resampler_.Process(task->pcm.data(), task->pcm.size(), resampled.data());
-                    task->pcm = std::move(resampled);
+                    try {
+                        int target_size = output_resampler_.GetOutputSamples(task->pcm.size());
+                        std::vector<int16_t> resampled(target_size);
+                        output_resampler_.Process(task->pcm.data(), task->pcm.size(), resampled.data());
+                        task->pcm = std::move(resampled);
+                    } catch (const std::bad_alloc&) {
+                        // 堆不足时丢这一帧，不要让异常逃出音频任务（会 abort 重启）
+                        if (read_failures_++ % 100 == 0) {
+                            ESP_LOGE(TAG, "No memory for playback resample (free=%u), dropping frame",
+                                     (unsigned)esp_get_free_heap_size());
+                        }
+                        continue;
+                    }
                 }
 
                 lock.lock();
@@ -431,34 +452,78 @@ void AudioService::SetEncodeSampleRate(int sample_rate, int frame_duration) {
 
 // 按需创建上行编码器。堆不足时返回 nullptr，由调用方丢帧并报错：
 // 让 std::bad_alloc 逃出音频任务会触发 std::terminate -> abort -> 重启循环。
+// 按需创建上行编码器。坑点：OpusEncoderWrapper 内部直接调用 opus_encoder_create()，
+// 它失败时只会让 wrapper 内部为空（audio_enc_ == nullptr），wrapper 本身却是有效的；
+// 那样之后每帧都会 "Audio encoder is not configured" 且永不再创建，
+// 表现就是“设备能听见但服务端收不到上行 → 用户听不到任何回复”。
+// 因此：大块分配前先确认有足够大的连续块，创建后再用堆下降量确认内部状态真的建起来了。
 OpusEncoderWrapper* AudioService::GetOrCreateEncoder() {
     if (opus_encoder_ != nullptr) {
         return opus_encoder_.get();
     }
+
+    // 16kHz 单声道 Opus 编码器实测约占 25.8KB（一次性大块分配），碎片化时容易失败
+    constexpr size_t kMinLargestBlock = 32 * 1024;
+    size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    if (largest < kMinLargestBlock) {
+        if (encoder_create_failures_++ % 100 == 0) {
+            ESP_LOGW(TAG, "No contiguous block for Opus encoder (largest=%u free=%u), dropping uplink frame",
+                     (unsigned)largest, (unsigned)esp_get_free_heap_size());
+        }
+        return nullptr;
+    }
+
+    size_t before = esp_get_free_heap_size();
     try {
         opus_encoder_ = std::make_unique<OpusEncoderWrapper>(encoder_sample_rate_, 1, encoder_frame_duration_);
-        ESP_LOGI(TAG, "Created Opus encoder on demand (rate=%d, frame=%dms)",
-                 encoder_sample_rate_, encoder_frame_duration_);
     } catch (const std::bad_alloc&) {
         // 帧间隔 60ms，失败时不要刷屏
         if (encoder_create_failures_++ % 100 == 0) {
             ESP_LOGE(TAG, "No memory for Opus encoder (free=%u largest=%u), dropping uplink frame",
-                     (unsigned)esp_get_free_heap_size(),
-                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+                     (unsigned)esp_get_free_heap_size(), (unsigned)largest);
         }
         return nullptr;
     }
+
+    // 堆没下降说明 opus_encoder_create() 内部失败了，丢弃这个空 wrapper，下一帧再试
+    if (before - esp_get_free_heap_size() < 16 * 1024) {
+        if (encoder_create_failures_++ % 100 == 0) {
+            ESP_LOGW(TAG, "Opus encoder state allocation failed (free=%u), will retry",
+                     (unsigned)esp_get_free_heap_size());
+        }
+        opus_encoder_.reset();
+        return nullptr;
+    }
+
+    ESP_LOGI(TAG, "Created Opus encoder on demand (rate=%d, frame=%dms)",
+             encoder_sample_rate_, encoder_frame_duration_);
     return opus_encoder_.get();
+}
+
+void AudioService::PrepareUplinkEncoder() {
+    if (GetOrCreateEncoder() == nullptr) {
+        ESP_LOGW(TAG, "Uplink encoder not ready yet, will retry on first uplink frame");
+    }
 }
 #endif // CONFIG_LSPLATFORM
 
 void AudioService::SetDecodeSampleRate(int sample_rate, int frame_duration) {
-    if (opus_decoder_->sample_rate() == sample_rate && opus_decoder_->duration_ms() == frame_duration) {
+    if (opus_decoder_ != nullptr && opus_decoder_->sample_rate() == sample_rate &&
+        opus_decoder_->duration_ms() == frame_duration) {
         return;
     }
 
     opus_decoder_.reset();
-    opus_decoder_ = std::make_unique<OpusDecoderWrapper>(sample_rate, 1, frame_duration);
+    try {
+        opus_decoder_ = std::make_unique<OpusDecoderWrapper>(sample_rate, 1, frame_duration);
+    } catch (const std::bad_alloc&) {
+        // 解码器为空时解码分支会直接丢弃数据，不抛异常（避免 abort 重启）
+        if (read_failures_++ % 100 == 0) {
+            ESP_LOGE(TAG, "No memory for Opus decoder (free=%u), dropping playback",
+                     (unsigned)esp_get_free_heap_size());
+        }
+        return;
+    }
 
     auto codec = Board::GetInstance().GetAudioCodec();
     if (opus_decoder_->sample_rate() != codec->output_sample_rate()) {
@@ -707,7 +772,9 @@ bool AudioService::IsIdle() {
 
 void AudioService::ResetDecoder() {
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
-    opus_decoder_->ResetState();
+    if (opus_decoder_ != nullptr) {
+        opus_decoder_->ResetState();
+    }
     timestamp_queue_.clear();
     audio_decode_queue_.clear();
     audio_playback_queue_.clear();
